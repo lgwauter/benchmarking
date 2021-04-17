@@ -13,6 +13,8 @@ from PIL import Image as PILImage
 import matplotlib.pyplot as plt
 import numpy as np
 import cv2
+from rvai.cells.yolov5.yolov5_config import Yolov5Parameters
+from rvai.cells.deep_sort.deep_sort import TrackerParameters
 
 from rvai.base.context import (
     Context,
@@ -76,8 +78,8 @@ from utils import visualize_tracker, mota
 class YoloTracker:
     def __init__(self,
                  tar_path: Path,
-                 yolo_params: dict,
-                 deepsort_params: dict):
+                 yolo_params: Yolov5Parameters,
+                 deepsort_params: TrackerParameters):
         self.tar_path = tar_path
         self.yolo_params = yolo_params
         self.deepsort_params = deepsort_params
@@ -91,19 +93,20 @@ class YoloTracker:
         self.yolo_model = None
         self.deepsort_model = None
 
-    def load_models(self, tar_path: Path):
+    def load_models(self,
+                    tar_path: Path):
         # Load Yolo Model
 
-        yaml_path = get_model_yaml(Enum[String]("Yolov5s", "Yolov5m", "Yolov5l", "Yolov5x", selected=self.yolo_params['variant']))
+        yaml_path = get_model_yaml(Enum[String]("Yolov5s", "Yolov5m", "Yolov5l", "Yolov5x", selected=self.yolo_params.yolov5_type.selected))
         yolol, yolom, yolos, deepsort = unpack_model('yolo', Path(tar_path), n_models=4)
         model_paths = {
             "Yolov5s": yolos,
             "Yolov5m": yolom,
             "Yolov5l": yolol
         }
-        model_path = model_paths[self.yolo_params['variant']]
+        model_path = model_paths[self.yolo_params.yolov5_type.selected]
 
-        yolo_model = YoloModel(yaml_path, nc=self.yolo_params['n_classes'])
+        yolo_model = YoloModel(yaml_path, nc=len(self.yolo_params.classes))
         device = select_device("")
         yolo_model = yolo_model.to(device)
         state_dict = torch.load(
@@ -114,7 +117,8 @@ class YoloTracker:
         yolo_model = yolo_model.fuse()
         yolo_model = yolo_model.eval()
         if device.type == "cuda":
-            set_half_prec(yolo_model, half_prec=self.yolo_params['half_prec'])
+            print("Cuda device successfully loaded")
+            set_half_prec(yolo_model, half_prec=self.yolo_params.half_prec)
 
         self.yolo_model = yolo_model
 
@@ -135,8 +139,8 @@ class YoloTracker:
 
         new_image, ratio_w, ratio_h, pad_w, pad_h = pre_process(
             image=image,
-            new_shape=(self.yolo_params['inp_size'], self.yolo_params['inp_size']),
-            full_pad=self.yolo_params['full_pad']
+            new_shape=(self.yolo_params.img_size.value, self.yolo_params.img_size.value),
+            full_pad=self.yolo_params.full_pad
         )
 
         device = select_device("")
@@ -145,8 +149,8 @@ class YoloTracker:
         # When running on cuda, take into account half precision mode
         if device.type == "cuda":
             self.yolo_model = self.yolo_model.cuda()
-            set_half_prec(self.yolo_model, half_prec=bool(self.yolo_params['half_prec']))
-            if self.yolo_params['half_prec']:
+            set_half_prec(self.yolo_model, half_prec=bool(self.yolo_params.half_prec))
+            if self.yolo_params.half_prec:
                 input_tensor = input_tensor.half()
 
         # Run prediction
@@ -155,10 +159,10 @@ class YoloTracker:
 
         # Apply NMS
         pred = non_max_suppression(
-            pred, self.yolo_params['conf_thresh'], self.yolo_params['iou_thresh']
+            pred, self.yolo_params.conf_thresh.value, self.yolo_params.iou_thresh.value
         )
 
-        class_to_idx, idx_to_class = self.yolo_params['classes'].class_index_mapping()
+        class_to_idx, idx_to_class = self.yolo_params.classes.class_index_mapping()
 
         # Translate predictions to RVAI bounding_boxes
         boxes = get_boxes(
@@ -175,7 +179,7 @@ class YoloTracker:
 
     def _deepsort_predict(self, image, boxes):
 
-        if self.deepsort_params['use_features']:
+        if self.deepsort_params.use_features:
             patch_shape = self.deepsort_model.get_input_shape()
             # Get patches
             patches = []
@@ -206,7 +210,7 @@ class YoloTracker:
         return tracklet_list, bboxes
 
 
-def perform_tracking(parameters: dict,
+def perform_tracking(parameters: TrackerParameters,
                      state: TrackerState,
                      detections: list):
     """Basically stolen from rvai, with some adaptations to work around the need for an InferenceContext"""
@@ -225,14 +229,14 @@ def perform_tracking(parameters: dict,
         detections=detections,
         timestamp=timestamp,
         id_gen=id_gen,
-        iou_threshold=parameters['iou_threshold'],
-        embedding_threshold=parameters['embedding_threshold'],
-        use_medoids=parameters['use_medoids'],
-        num_medoids=parameters['num_medoids'],
-        min_init=parameters['min_init'],
-        max_missing=parameters['max_missing'],
-        max_tracklet_size=parameters['max_tracklet_size'],
-        metric_function=parameters['metric_function'],
+        iou_threshold=parameters.iou_threshold,
+        embedding_threshold=parameters.embedding_threshold.value,
+        use_medoids=parameters.use_medoids,
+        num_medoids=parameters.num_medoids,
+        min_init=parameters.min_init.value,
+        max_missing=parameters.max_missing.value,
+        max_tracklet_size=parameters.max_tracklet_size.value,
+        metric_function=parameters.metric_function.selected,
     )
 
     # Store the new tracks in the state
@@ -240,12 +244,12 @@ def perform_tracking(parameters: dict,
 
     tracklets = []
     # Generate tracklet output from the track objects
-    max_output_misses = parameters['max_output_misses']
+    max_output_misses = parameters.max_output_misses
     for track in res_tracks:
         if track.is_confirmed() and track.misses <= max_output_misses:
             tracklets.append(
                 track_to_tracklet(
-                    track, parameters['tracklet_granularity']
+                    track, parameters.tracklet_granularity
                 )
             )
 
@@ -267,35 +271,35 @@ if __name__ == '__main__':
     # CONFIGURE HERE
     # --------------------------------------------------------------------------------------
 
-    os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+    # os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 
     tar_path = "/home/laurens/Downloads/Yolotracking(3).tgz"
-    YOLO_PARAMS = {
-        'variant': "Yolov5s",
-        'n_classes': 1,
-        'inp_size': 1088,
-        'full_pad': False,
-        'half_prec': False,
-        'conf_thresh': 0.4,
-        'iou_thresh': 0.5,
-        'classes': Classes([
-            Class(class_uuid='Person', name='Person')
-        ])
-    }
-
-    DEEPSORT_PARAMS = {
-        'iou_threshold': 0.75,
-        'embedding_threshold': 2.0,
-        'use_medoids': False,
-        'num_medoids': 1,
-        'min_init': 2,
-        'max_missing': 6,
-        'max_tracklet_size': 60.0,
-        'metric_function': "cosine",
-        'max_output_misses': 0,
-        'use_features': True,
-        'tracklet_granularity': 0.5
-    }
+    YOLO_PARAMS = Yolov5Parameters(
+        classes=Classes([Class(class_uuid='Person', name='Person')]),
+        yolov5_type=Enum[String](["Yolov5s",
+                                  "Yolov5m",
+                                  "Yolov5l",
+                                  "Yolov5x"], selected="Yolov5l"),
+        conf_thresh=FloatRange(value=0.4),
+        iou_thresh=FloatRange(value=0.5),
+        half_prec=Boolean(False),
+        full_pad=Boolean(False),
+        img_size=IntegerRange(1088)
+    )
+    DEEPSORT_PARAMS = TrackerParameters(
+        iou_threshold=FloatRange(0.75),
+        embedding_threshold=FloatRange(2.0),
+        use_medoids=Boolean(False),
+        num_medoids=IntegerRange(1),
+        min_init=IntegerRange(2),
+        max_missing=IntegerRange(6),
+        max_tracklet_size=FloatRange(60.0),
+        metric_function=Enum[String](["euclidian",
+                                      "cosine"], selected="cosine"),
+        max_output_misses=IntegerRange(0),
+        use_features=Boolean(True),
+        tracklet_granularity=FloatRange(0.5)
+    )
 
     # END CONFIGURATION
     # --------------------------------------------------------------------------------------

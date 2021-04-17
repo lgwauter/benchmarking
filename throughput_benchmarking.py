@@ -55,12 +55,50 @@ import time
 
 from tracking_dataset import TrackerDataset
 from rvai.base.resources import CellResources
+from benchmark_fairmot import FairMOTTracker
+from benchmark_yolotracker import YoloTracker
 
 #import tensorflow as tf
 
 #physical_devices = tf.config.experimental.list_physical_devices('GPU')
 #assert len(physical_devices) > 0, "Not enough GPU hardware devices available"
 #tf.config.experimental.set_memory_growth(physical_devices[0], True)
+
+
+def load_tracker(tar_path: Path,
+               parameters: dict,
+               tracker_type='yolo'):
+    if tracker_type == 'yolo':
+        tracker = YoloTracker(tar_path, yolo_params=parameters['detector'], deepsort_params=parameters['tracker'])
+        tracker.load_models(tar_path=tar_path)
+
+    else:
+        tracker = FairMOTTracker(tar_path, parameters=parameters['fairmot'])
+        tracker.load_model()
+
+    return tracker
+
+
+def benchmark_task_no_sdk(benchmark_images, n_iter, tar_path:Path, parameters, tracker_type='yolo'):
+    warmup = 10
+
+    tracker = load_tracker(tar_path, parameters, tracker_type)
+
+    for i in range(warmup):
+        _ = tracker.predict(benchmark_images[i])
+
+    start = time.time()
+    for i in range(warmup, warmup+n_iter):
+        t = time.time()
+        _ = tracker.predict(benchmark_images[i])
+        print(f'\r{time.time()-t}', end='')
+    end = time.time()
+
+    fps = n_iter/(end-start)
+    print(f"\nFPS: {fps}")
+
+    return fps
+
 
 def benchmark_task(runtime, task, benchmark_images, replicas=None, n_iter=50):
     # Start an inference process for the task
@@ -103,11 +141,12 @@ def benchmark_task(runtime, task, benchmark_images, replicas=None, n_iter=50):
     return throughput, latency
 
 
-def benchmark(runtime, pipeline, models, image_sizes, n_iter, dataset, parameters, tracker_type='yolo', replicas=None):
+def benchmark(runtime, pipeline, models, image_sizes, n_iter, dataset, parameters, tracker_type='yolo',
+              replicas=None, tar_path=None, use_sdk=True):
     results = defaultdict(list)
     for img_name, image_size in image_sizes.items():
         # Prepare data for testing
-        images = [Image(cv2.resize(np.array(dataset[idx][0], dtype='uint8'), image_size)) for idx in range(len(dataset))]
+        images = [Image(cv2.resize(np.array(im, dtype='uint8'), image_size)) for im, _ in dataset]
         results[img_name] = []
 
         if tracker_type == 'yolo':
@@ -130,28 +169,59 @@ def benchmark(runtime, pipeline, models, image_sizes, n_iter, dataset, parameter
         )
 
         # Perform benchmarking
-        res = benchmark_task(runtime, inference, images, replicas=replicas, n_iter=n_iter)
+        if use_sdk:
+            res = benchmark_task(runtime, inference, images, replicas=replicas, n_iter=n_iter)
+        else:
+            res = benchmark_task_no_sdk(benchmark_images=images, n_iter=n_iter, parameters=parameters,
+                                        tracker_type=tracker_type, tar_path=tar_path)
         results[img_name].append(res)
     return results
 
 
 if __name__ == '__main__':
-
-    # Configurations here
+    # --------------------------------------------------
+    # Configurations here                               |
     # --------------------------------------------------
 
-    TRACKER_TYPE = "yolo"
+    # GPU configs
+    # --------------------------------------------------
 
-    runtime_type = "ray"  # ray, debug
+    # os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+    import tensorflow as tf
+    import torch
+
+    physical_devices = tf.config.experimental.list_physical_devices('GPU')
+    assert len(physical_devices) > 0, "Not enough GPU hardware devices available"
+    tf.config.experimental.set_memory_growth(physical_devices[0], True)
+
+    # torch.cuda.set_per_process_memory_fraction(0.5, 0)
+
+    # General configs
+    # --------------------------------------------------
+
+    TRACKER_TYPE = "fairmot"
+
+    USE_SDK = False
 
     image_sizes = {  # The image sizes we wish to test
-        "480p": (852, 480),
-        "720p": (1280, 720),
-        "1080": (1920, 1080)
+        "480p": (864, 480),
+        "720p": (1280, 736),
+        "1080": (1920, 1088)
     }
 
-    YOLO_TAR_PATH = Path("/home/laurens/Yolotracking(3).tgz")
-    FAIRMOT_TAR_PATH = Path("/home/laurens/Fairmottracking(1).tgz")
+    YOLO_TAR_PATH = Path('/home/laurens/Downloads/Yolotracking(3).tgz') # Path("/home/laurens/Yolotracking(3).tgz")
+    FAIRMOT_TAR_PATH = Path('/home/laurens/Downloads/Fairmottracking(1).tgz') # Path("/home/laurens/Fairmottracking(1).tgz")
+
+    # Make a dataset
+    # --------------------------------------------------
+
+    data = TrackerDataset(
+        img_folder_path=Path('/home/laurens/Documents/MOT20/train/MOT20-01/img1/'),  # Path('/home/laurens/MOT/'),
+        annotations_path= Path('/home/laurens/Documents/MOT20/train/MOT20-01/gt/gt.txt'), # Path('/home/laurens/gt.txt'),
+        classes_of_interest=[1, 2, 7],
+        relabel={1: 14, 2: 14, 7: 14}
+    )
+
 
     YOLO_PARAMETERS = Yolov5Parameters(
         classes=Classes([Class(class_uuid='Person', name='Person')]),
@@ -239,27 +309,12 @@ if __name__ == '__main__':
     debug_rt = init('debug')
     #ray_rt = init('ray')
 
-    # Make a dataset
-    # --------------------------------------------------
-
-    data = TrackerDataset(
-        img_folder_path=Path('/home/laurens/MOT/'),
-        annotations_path=Path('/home/laurens/gt.txt'),
-        classes_of_interest=[1, 2, 7],
-        relabel={1: 14, 2: 14, 7: 14}
-    )
-    
-    import tensorflow as tf
-    import time
-    print(f"GPU available: {tf.test.is_gpu_available()}")
-    time.sleep(10)
-
     # Do the benchmarking
     # ---------------------------------------------------
 
     debug_results = benchmark(debug_rt, pipeline, models, image_sizes,
-                              n_iter=50, dataset=data, parameters=pipeline_parameters,
-                              tracker_type=TRACKER_TYPE)
+                              n_iter=200, dataset=data, parameters=pipeline_parameters,
+                              tracker_type=TRACKER_TYPE, replicas=None, tar_path=tar_path, use_sdk=USE_SDK)
 
     #ray_results = benchmark(ray_rt, pipeline, models, image_sizes,
     #                          n_iter=50, dataset=data, parameters=pipeline_parameters,

@@ -113,7 +113,7 @@ class FairMOTTracker:
         }
 
         # Create the model
-        backbone = self.parameters.backbone.lower()
+        backbone = self.parameters.backbone.selected.lower()
         model_ = create_model(arch=backbone, heads=heads)
 
         # Load the model path, if any
@@ -216,7 +216,7 @@ if __name__ == "__main__":
             Class(class_uuid='Person', name='Person')
         ]),
         # MODEL PARAMETERS
-        backbone="DLA-34",
+        backbone=Enum[String]([], selected="DLA-34"),
         reid_dim=128,
         class_specific_size = False,
         # TRAINING AND RUNTIME PARAMETERS
