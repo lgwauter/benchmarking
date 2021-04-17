@@ -54,31 +54,42 @@ from rvai.base.drivers import Source, Sink
 import time
 
 from tracking_dataset import TrackerDataset
+from rvai.base.resources import CellResources
 
-def benchmark_task(runtime, task, benchmark_images, replicas=None):
+#import tensorflow as tf
+
+#physical_devices = tf.config.experimental.list_physical_devices('GPU')
+#assert len(physical_devices) > 0, "Not enough GPU hardware devices available"
+#tf.config.experimental.set_memory_growth(physical_devices[0], True)
+
+def benchmark_task(runtime, task, benchmark_images, replicas=None, n_iter=50):
     # Start an inference process for the task
     proc = runtime.start_inference(task)
 
     print("Starting new benchmark task ...")
 
+    warmup = 10
+
     # Scale if needed
     if replicas is not None:
         proc.set_replicas(replicas)
     # Do a couple of predictions or warmup
-    for i in range(5):
+    for i in range(warmup):
         out = proc.predict({"image": benchmark_images[i]}).result()
 
     # Do throughput measurements
-    n_iter = len(benchmark_images)
     start = time.time()
+
     # Do prediction requests
-    for i in range(5, n_iter):
+
+    for i in range(warmup, warmup+n_iter):
         fut = proc.predict({"image": benchmark_images[i]})
     # Get the last result
     fut.result()
     stop = time.time()
 
     # Estimate throughput
+    print(f"Did {n_iter} iterations in {stop-start} seconds time")
     throughput = n_iter / (stop - start)
 
     # Measure the latency
@@ -96,23 +107,30 @@ def benchmark(runtime, pipeline, models, image_sizes, n_iter, dataset, parameter
     results = defaultdict(list)
     for img_name, image_size in image_sizes.items():
         # Prepare data for testing
-        images = [Image(cv2.resize(np.array(dataset[idx][0], dtype='uint8'), image_size)) for idx in range(n_iter)]
+        images = [Image(cv2.resize(np.array(dataset[idx][0], dtype='uint8'), image_size)) for idx in range(len(dataset))]
         results[img_name] = []
 
         if tracker_type == 'yolo':
             parameters['detector'].img_size = IntegerRange(image_size[0])  # Take the largest size
         else:
-            parameters['fairmot'].model_input_width = IntegerRange(image_size[0]),
+            parameters['fairmot'].model_input_width = IntegerRange(image_size[0])
             parameters['fairmot'].model_input_height = IntegerRange(image_size[1])
+        
+        resources = {
+            'detector': CellResources(gpus=0.5),
+            'tracker': CellResources(gpus=0.5)
+        } if tracker_type == 'yolo' else \
+            {'fairmot': CellResources(gpus=1.0)}
 
         inference = Inference(
             pipeline=pipeline,
             parameters=parameters,
-            models=models
+            models=models,
+            resources=resources
         )
 
         # Perform benchmarking
-        res = benchmark_task(runtime, inference, images, replicas=replicas)
+        res = benchmark_task(runtime, inference, images, replicas=replicas, n_iter=n_iter)
         results[img_name].append(res)
     return results
 
@@ -132,15 +150,15 @@ if __name__ == '__main__':
         "1080": (1920, 1080)
     }
 
-    YOLO_TAR_PATH = Path("/home/laurens/Downloads/Yolotracking(3).tgz")
-    FAIRMOT_TAR_PATH = Path("/home/laurens/Downloads/Fairmottracking(1).tgz")
+    YOLO_TAR_PATH = Path("/home/laurens/Yolotracking(3).tgz")
+    FAIRMOT_TAR_PATH = Path("/home/laurens/Fairmottracking(1).tgz")
 
     YOLO_PARAMETERS = Yolov5Parameters(
         classes=Classes([Class(class_uuid='Person', name='Person')]),
         yolov5_type=Enum[String](["Yolov5s",
                                   "Yolov5m",
                                   "Yolov5l",
-                                  "Yolov5x"], selected="Yolov5m"),
+                                  "Yolov5x"], selected="Yolov5l"),
         conf_thresh=FloatRange(value=0.4),
         iou_thresh=FloatRange(value=0.5),
         half_prec=Boolean(False),
@@ -219,17 +237,22 @@ if __name__ == '__main__':
     # --------------------------------------------------
 
     debug_rt = init('debug')
-    ray_rt = init('ray')
+    #ray_rt = init('ray')
 
     # Make a dataset
     # --------------------------------------------------
 
     data = TrackerDataset(
-        img_folder_path=Path('/home/laurens/Documents/MOT20/train/MOT20-01/img1/'),
-        annotations_path=Path('/home/laurens/Documents/MOT20/train/MOT20-01/gt/gt.txt'),
+        img_folder_path=Path('/home/laurens/MOT/'),
+        annotations_path=Path('/home/laurens/gt.txt'),
         classes_of_interest=[1, 2, 7],
         relabel={1: 14, 2: 14, 7: 14}
     )
+    
+    import tensorflow as tf
+    import time
+    print(f"GPU available: {tf.test.is_gpu_available()}")
+    time.sleep(10)
 
     # Do the benchmarking
     # ---------------------------------------------------
@@ -238,7 +261,8 @@ if __name__ == '__main__':
                               n_iter=50, dataset=data, parameters=pipeline_parameters,
                               tracker_type=TRACKER_TYPE)
 
-    ray_results = benchmark(ray_rt, pipeline, models, image_sizes,
-                              n_iter=50, dataset=data, parameters=pipeline_parameters,
-                              tracker_type=TRACKER_TYPE)
-
+    #ray_results = benchmark(ray_rt, pipeline, models, image_sizes,
+    #                          n_iter=50, dataset=data, parameters=pipeline_parameters,
+    #                          tracker_type=TRACKER_TYPE)
+    
+    print(debug_results)
